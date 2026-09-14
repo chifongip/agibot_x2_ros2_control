@@ -12,6 +12,7 @@
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
+  <depend>trajectory_msgs</depend>
   <build_depend>pkg-config</build_depend>
   <build_depend>libzmq3-dev</build_depend>
   <exec_depend>libzmq3-dev</exec_depend>

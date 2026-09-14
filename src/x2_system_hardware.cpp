@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <iomanip>
 #include <limits>
@@ -30,6 +31,7 @@ constexpr std::array<const char *, 31> kExpectedJoints = {
   "right_shoulder_roll_joint", "right_shoulder_yaw_joint", "right_elbow_joint",
   "right_wrist_yaw_joint", "right_wrist_pitch_joint", "right_wrist_roll_joint",
   "head_yaw_joint", "head_pitch_joint"};
+constexpr int32_t kZeroStartupHoldDurationSec = std::numeric_limits<int32_t>::max();
 
 bool has_interface(
   const std::vector<hardware_interface::InterfaceInfo> & interfaces, const std::string & name)
@@ -109,6 +111,9 @@ hardware_interface::CallbackReturn X2SystemHardware::on_init(
     } else if (!configure_zmq_transport()) {
       return CallbackReturn::ERROR;
     }
+    initial_zero_trajectory_publisher_ =
+      node_->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+      initial_zero_trajectory_topic_, rclcpp::SystemDefaultsQoS());
 
     executor_->add_node(node_);
     spin_thread_ = std::thread([this]() {executor_->spin();});
@@ -194,6 +199,12 @@ bool X2SystemHardware::parse_configuration()
   if (command_transport_ != "ros_topic" && command_transport_ != "zmq") {
     throw std::invalid_argument("command_transport must be 'ros_topic' or 'zmq'");
   }
+  initial_arm_command_mode_ =
+    get_parameter(parameters, "initial_arm_command_mode", "measured");
+  if (initial_arm_command_mode_ != "measured" && initial_arm_command_mode_ != "zero") {
+    throw std::invalid_argument(
+            "initial_arm_command_mode must be 'measured' or 'zero'");
+  }
   state_topics_ = {
     get_parameter(parameters, "leg_state_topic", "/aima/hal/joint/leg/state"),
     get_parameter(parameters, "waist_state_topic", "/aima/hal/joint/waist/state"),
@@ -201,6 +212,8 @@ bool X2SystemHardware::parse_configuration()
     get_parameter(parameters, "head_state_topic", "/aima/hal/joint/head/state")};
   arm_command_topic_ =
     get_parameter(parameters, "arm_command_topic", "/aima/hal/joint/arm/command");
+  initial_zero_trajectory_topic_ = get_parameter(
+    parameters, "initial_zero_trajectory_topic", "/dual_arm_controller/joint_trajectory");
   zmq_endpoint_ = get_parameter(parameters, "zmq_endpoint", "tcp://*:8559");
   state_timeout_sec_ = parse_positive(parameters, "state_timeout_sec", 0.1);
   activation_timeout_sec_ = parse_positive(parameters, "activation_timeout_sec", 2.0);
@@ -350,11 +363,14 @@ hardware_interface::CallbackReturn X2SystemHardware::on_activate(
         state_mutexes_[0], state_mutexes_[1], state_mutexes_[2], state_mutexes_[3],
         command_mutex_);
       if (state_is_fresh_locked(std::chrono::steady_clock::now())) {
+        initial_zero_command_pending_ = initial_arm_command_mode_ == "zero";
         for (const auto index : arm_indices_) {
           commands_[index] = positions_[index];
         }
         active_ = true;
-        RCLCPP_INFO(node_->get_logger(), "X2 hardware activated at measured arm positions");
+        RCLCPP_INFO(
+          node_->get_logger(), "X2 hardware activated (initial arm command mode: %s)",
+          initial_arm_command_mode_.c_str());
         return CallbackReturn::SUCCESS;
       }
     }
@@ -409,7 +425,9 @@ hardware_interface::return_type X2SystemHardware::perform_command_mode_switch(
   const std::vector<std::string> & stop_interfaces)
 {
   std::scoped_lock lock(state_mutexes_[2], command_mutex_);
-  const auto update_claim = [this](const std::string & interface, bool claimed) {
+  bool initial_zero_command_applied = false;
+  const auto update_claim = [this, &initial_zero_command_applied](
+    const std::string & interface, bool claimed) {
       const auto separator = interface.rfind('/');
       if (separator == std::string::npos ||
         interface.substr(separator + 1) != hardware_interface::HW_IF_POSITION)
@@ -425,13 +443,24 @@ hardware_interface::return_type X2SystemHardware::perform_command_mode_switch(
         return;
       }
       claimed_[index] = claimed;
-      commands_[index] = positions_[index];
+      if (claimed && initial_zero_command_pending_) {
+        commands_[index] = 0.0;
+        initial_zero_command_applied = true;
+      } else {
+        commands_[index] = positions_[index];
+      }
     };
   for (const auto & interface : stop_interfaces) {
     update_claim(interface, false);
   }
   for (const auto & interface : start_interfaces) {
     update_claim(interface, true);
+  }
+  if (initial_zero_command_applied) {
+    initial_zero_command_pending_ = false;
+    initial_zero_trajectory_pending_ = true;
+    RCLCPP_INFO(
+      node_->get_logger(), "Applying zero startup target to all claimed arm joints");
   }
   return hardware_interface::return_type::OK;
 }
@@ -474,9 +503,14 @@ hardware_interface::return_type X2SystemHardware::write(
     return hardware_interface::return_type::OK;
   }
   std::vector<double> targets;
+  bool should_publish_initial_zero_trajectory = false;
   {
     std::scoped_lock lock(state_mutexes_[2], command_mutex_);
     targets = safe_targets_locked();
+    if (initial_zero_trajectory_pending_) {
+      initial_zero_trajectory_pending_ = false;
+      should_publish_initial_zero_trajectory = true;
+    }
   }
   if (std::any_of(
       targets.begin(), targets.end(),
@@ -485,6 +519,9 @@ hardware_interface::return_type X2SystemHardware::write(
     enter_fault("controller produced a non-finite arm target");
     return hardware_interface::return_type::ERROR;
   }
+  if (should_publish_initial_zero_trajectory) {
+    publish_initial_zero_trajectory();
+  }
   if (command_transport_ == "ros_topic") {
     publish_ros_commands(targets, false);
   } else if (!publish_zmq_commands(targets)) {
@@ -492,6 +529,27 @@ hardware_interface::return_type X2SystemHardware::write(
     return hardware_interface::return_type::ERROR;
   }
   return hardware_interface::return_type::OK;
+}
+
+void X2SystemHardware::publish_initial_zero_trajectory()
+{
+  if (!initial_zero_trajectory_publisher_) {
+    return;
+  }
+  trajectory_msgs::msg::JointTrajectory message;
+  message.joint_names.reserve(arm_indices_.size());
+  for (const auto index : arm_indices_) {
+    message.joint_names.push_back(info_.joints[index].name);
+  }
+  auto & point = message.points.emplace_back();
+  point.positions.assign(arm_indices_.size(), 0.0);
+  auto & hold_point = message.points.emplace_back();
+  hold_point.positions.assign(arm_indices_.size(), 0.0);
+  hold_point.time_from_start.sec = kZeroStartupHoldDurationSec;
+  initial_zero_trajectory_publisher_->publish(message);
+  RCLCPP_INFO(
+    node_->get_logger(), "Published zero startup trajectory to %s",
+    initial_zero_trajectory_topic_.c_str());
 }
 
 void X2SystemHardware::publish_ros_commands(

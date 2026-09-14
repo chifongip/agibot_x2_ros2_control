@@ -11,6 +11,7 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(trajectory_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED IMPORTED_TARGET libzmq)
 
@@ -28,6 +29,7 @@ ament_target_dependencies(${PROJECT_NAME}
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  trajectory_msgs
 )
 target_link_libraries(${PROJECT_NAME} PkgConfig::ZMQ)
 
@@ -59,5 +61,5 @@ endif()
 
 ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
-ament_export_dependencies(aimdk_msgs hardware_interface pluginlib rclcpp rclcpp_lifecycle)
+ament_export_dependencies(aimdk_msgs hardware_interface pluginlib rclcpp rclcpp_lifecycle trajectory_msgs)
 ament_package()

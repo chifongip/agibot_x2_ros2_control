@@ -25,6 +25,21 @@ on port 8559.
 Arm gains are loaded from `x2_ros2_control_gains.yaml`. Pass an alternate file
 with `ros2_control_gains_file:=/absolute/path/to/gains.yaml`.
 
+`initial_arm_command_mode:=measured` is the default safe handoff: the hardware
+interface holds the measured arm position when `dual_arm_controller` first
+claims the joints. `initial_arm_command_mode:=zero` instead supplies all
+fourteen arm joints with a zero-radian target at that first controller claim.
+The hardware also supplies a zero target and a maximum-duration duplicate hold
+point to `dual_arm_controller`, so its activation hold target is zero rather
+than the measured pose. The hold does not time out under the controller's
+normal goal tolerance; a later MoveIt trajectory replaces it. This is an
+explicit startup command, not a MoveIt-planned trajectory.
+
+When shared state is already running (`start_state_bringup:=false`), launch
+arguments cannot change that existing hardware instance. Choose
+`initial_arm_command_mode` when launching the original state bringup; changing
+the startup target later requires restarting that hardware instance.
+
 Real-hardware activation requires fresh finite samples for every X2 joint. A
 state timeout latches an error. Direct topic control then sends arm damping
 commands for 0.2 seconds; ZMQ output stops and RoboJuDo handles its own timeout.

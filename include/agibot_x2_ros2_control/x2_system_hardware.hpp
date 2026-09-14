@@ -6,6 +6,7 @@
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include <array>
 #include <atomic>
@@ -57,6 +58,7 @@ private:
   bool configure_zmq_transport();
   void stop_io();
   void publish_ros_commands(const std::vector<double> & targets, bool damping_only);
+  void publish_initial_zero_trajectory();
   bool publish_zmq_commands(const std::vector<double> & targets);
   void enter_fault(const std::string & reason);
   std::vector<double> safe_targets_locked() const;
@@ -67,10 +69,14 @@ private:
   std::thread spin_thread_;
   std::atomic<bool> active_{false};
   std::atomic<bool> fault_latched_{false};
+  bool initial_zero_command_pending_{false};
+  bool initial_zero_trajectory_pending_{false};
 
   std::array<rclcpp::Subscription<aimdk_msgs::msg::JointStateArray>::SharedPtr,
     4> state_subscriptions_;
   rclcpp::Publisher<aimdk_msgs::msg::JointCommandArray>::SharedPtr arm_command_publisher_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr
+    initial_zero_trajectory_publisher_;
 
   mutable std::array<std::mutex, 4> state_mutexes_;
   mutable std::mutex command_mutex_;
@@ -88,8 +94,10 @@ private:
   std::vector<double> damping_;
 
   std::string command_transport_{"ros_topic"};
+  std::string initial_arm_command_mode_{"measured"};
   std::array<std::string, 4> state_topics_{};
   std::string arm_command_topic_;
+  std::string initial_zero_trajectory_topic_{"/dual_arm_controller/joint_trajectory"};
   std::string zmq_endpoint_;
   double state_timeout_sec_{0.1};
   double activation_timeout_sec_{2.0};
